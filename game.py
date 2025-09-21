@@ -117,11 +117,14 @@ class DaifugoEnv:
         
         if self.visualize:
             pygame.init()
-            self.screen = pygame.display.set_mode((1200, 800))
+            self.screen = pygame.display.set_mode((1280, 860))
             pygame.display.set_caption("Daifugō Card Game")
             self.clock = pygame.time.Clock()
             self.font = pygame.font.SysFont('Arial', 24)
+            self.small_font = pygame.font.SysFont('Arial', 18)
+            self.large_font = pygame.font.SysFont('Arial', 32)
             self.card_images = self.load_card_images()
+            self.background = self.create_background_surface()
         
         self.reset(first_hand=True)
     
@@ -145,7 +148,12 @@ class DaifugoEnv:
         self.move_log = []
         self.first_move = True
         self.revolution = False
-        
+
+        if first_hand:
+            self.round = 1
+        else:
+            self.round += 1
+
         self.current_player = random.randint(0, self.num_players - 1)
         if not first_hand and self.winner_order:
             self.exchange_cards()
@@ -241,32 +249,114 @@ class DaifugoEnv:
             card_images[52] = None
         return card_images
 
+    def create_background_surface(self):
+        """Creates a subtle gradient background to make the UI more vibrant."""
+        width, height = self.screen.get_size()
+        background = pygame.Surface((width, height))
+        top_color = pygame.Color(30, 130, 70)
+        bottom_color = pygame.Color(5, 60, 30)
+        for y in range(height):
+            ratio = y / height
+            color = (
+                int(top_color.r * (1 - ratio) + bottom_color.r * ratio),
+                int(top_color.g * (1 - ratio) + bottom_color.g * ratio),
+                int(top_color.b * (1 - ratio) + bottom_color.b * ratio),
+            )
+            pygame.draw.line(background, color, (0, y), (width, y))
+        return background
+
     def render(self):
         """Renders the game state using Pygame (all player hands face-up)."""
         if not self.visualize:
             return
-        self.screen.fill((0, 128, 0))
-        for idx, hand in enumerate(self.hands):
-            pos = (50, 50 + idx * 150)
-            label = f"Player {idx}"
-            label_surface = self.font.render(label, True, (255, 255, 255))
-            self.screen.blit(label_surface, (pos[0], pos[1] - 30))
-            for i, card in enumerate(sorted(hand)):
-                if self.card_images.get(card):
-                    self.screen.blit(self.card_images[card], (pos[0] + i * 90, pos[1]))
-                else:
-                    card_text = self.font.render(index_to_card(card), True, (0, 0, 0))
-                    self.screen.blit(card_text, (pos[0] + i * 90, pos[1]))
-        lm_text = "Last Move: "
+
+        self.screen.blit(self.background, (0, 0))
+
+        # Draw information sidebar
+        sidebar_rect = pygame.Rect(950, 40, 300, 760)
+        pygame.draw.rect(self.screen, (15, 40, 25), sidebar_rect, border_radius=16)
+        pygame.draw.rect(self.screen, (220, 220, 220), sidebar_rect, width=2, border_radius=16)
+
+        status_y = sidebar_rect.y + 20
+        title_surface = self.large_font.render("Game Status", True, (240, 240, 240))
+        self.screen.blit(title_surface, (sidebar_rect.x + 20, status_y))
+        status_y += 50
+
+        info_lines = [
+            f"Round: {self.round}",
+            f"Current: Player {self.current_player}",
+            f"Pass Count: {self.pass_count}",
+            f"Mode: {'Revolution' if self.revolution else 'Normal'}",
+        ]
+        for line in info_lines:
+            info_surface = self.font.render(line, True, (220, 220, 220))
+            self.screen.blit(info_surface, (sidebar_rect.x + 20, status_y))
+            status_y += 32
+
+        status_y += 10
+        self.screen.blit(self.font.render("Last Move", True, (255, 215, 0)), (sidebar_rect.x + 20, status_y))
+        status_y += 30
         if self.last_move:
-            lm_text += f"{self.last_move['type']} " + " ".join(index_to_card(c) for c in self.last_move["cards"])
+            last_move_lines = [
+                f"Type: {self.last_move['type'].title()}",
+                "Cards: " + ", ".join(index_to_card(c) for c in self.last_move["cards"]) if self.last_move["cards"] else "Cards: -"
+            ]
         else:
-            lm_text += "None"
-        lm_surface = self.font.render(lm_text, True, (255, 255, 0))
-        self.screen.blit(lm_surface, (50, 700))
-        rev_text = "Revolution ON" if self.revolution else "Normal Order"
-        rev_surface = self.font.render(rev_text, True, (255, 0, 0))
-        self.screen.blit(rev_surface, (900, 50))
+            last_move_lines = ["Type: None", "Cards: -"]
+        for line in last_move_lines:
+            lm_surface = self.small_font.render(line, True, (235, 235, 235))
+            self.screen.blit(lm_surface, (sidebar_rect.x + 20, status_y))
+            status_y += 24
+
+        status_y += 20
+        if self.winner_order:
+            self.screen.blit(self.font.render("Finished", True, (173, 216, 230)), (sidebar_rect.x + 20, status_y))
+            status_y += 28
+            for place, player in enumerate(self.winner_order, start=1):
+                line = f"{place}: Player {player}"
+                place_surface = self.small_font.render(line, True, (210, 210, 210))
+                self.screen.blit(place_surface, (sidebar_rect.x + 20, status_y))
+                status_y += 22
+
+        # Draw move log preview at the bottom of sidebar
+        log_title_surface = self.font.render("Recent Moves", True, (255, 215, 0))
+        self.screen.blit(log_title_surface, (sidebar_rect.x + 20, sidebar_rect.bottom - 220))
+        log_entries = self.move_log[-6:]
+        for i, entry in enumerate(log_entries):
+            log_surface = self.small_font.render(entry, True, (200, 200, 200))
+            self.screen.blit(log_surface, (sidebar_rect.x + 20, sidebar_rect.bottom - 190 + i * 24))
+
+        # Draw player areas
+        base_x = 60
+        base_y = 80
+        row_spacing = 140
+        highlight_color = (255, 215, 0)
+        card_spacing = 85
+
+        for idx, hand in enumerate(self.hands):
+            area_rect = pygame.Rect(base_x - 20, base_y - 40 + idx * row_spacing, 840, 120)
+            bg_color = (40, 110, 70) if idx != self.current_player else (70, 130, 90)
+            pygame.draw.rect(self.screen, bg_color, area_rect, border_radius=12)
+            pygame.draw.rect(self.screen, highlight_color if idx == self.current_player else (180, 180, 180), area_rect, width=2, border_radius=12)
+
+            label = f"Player {idx} ({len(hand)} cards)"
+            label_surface = self.font.render(label, True, (255, 255, 255))
+            self.screen.blit(label_surface, (area_rect.x + 10, area_rect.y - 28))
+
+            for i, card in enumerate(sorted(hand)):
+                x = base_x + i * card_spacing
+                y = base_y + idx * row_spacing
+                if self.card_images.get(card):
+                    card_surface = self.card_images[card]
+                    self.screen.blit(card_surface, (x, y))
+                else:
+                    card_rect = pygame.Rect(x, y, 70, 100)
+                    pygame.draw.rect(self.screen, (250, 250, 250), card_rect, border_radius=8)
+                    pygame.draw.rect(self.screen, (50, 50, 50), card_rect, width=2, border_radius=8)
+                    card_text = self.font.render(index_to_card(card), True, (20, 20, 20))
+                    text_rect = card_text.get_rect(center=card_rect.center)
+                    self.screen.blit(card_text, text_rect)
+
         pygame.display.flip()
         self.clock.tick(30)
     
@@ -348,6 +438,69 @@ class DaifugoEnv:
                     valid_indices.append(a)
         return valid_indices
 
+    def get_valid_moves(self, player_index):
+        """Returns a list of (action_index, move_dict) pairs for valid moves."""
+        valid_moves = []
+        for action_index in self.get_valid_action_indices(player_index):
+            move = self.decode_action(action_index, player_index)
+            if move is not None:
+                valid_moves.append((action_index, move))
+        return valid_moves
+
+    def is_high_cost_move(self, move):
+        """
+        Heuristic to determine whether a move spends valuable resources.
+        Uses rank thresholds and joker usage to approximate costliness.
+        """
+        if move["type"] == "pass":
+            return False
+        ranks = []
+        joker_used = any(card == 52 for card in move["cards"])
+        for card in move["cards"]:
+            if card == 52:
+                continue
+            ranks.append(RANKS[card // 4])
+        high_rank = any(get_rank_value(rank, self.revolution) >= 11 for rank in ranks)
+        long_sequence = move["type"] == "sequence" and len(move["cards"]) >= 4
+        big_set = move["type"] in ("triplet", "four")
+        return joker_used or high_rank or long_sequence or big_set
+
+    def compute_strategic_reward(self, move, valid_moves):
+        """
+        Provides additional shaping rewards to encourage strategic behaviours
+        such as conserving powerful cards and passing at the right time.
+        """
+        if not valid_moves:
+            return 0.0
+
+        non_pass_moves = [mv for _, mv in valid_moves if mv["type"] != "pass"]
+        if move["type"] == "pass":
+            if not non_pass_moves:
+                # Passing because nothing else is available shouldn't be punished.
+                return 0.1
+            # Reward passing if every available move is costly, otherwise apply a mild penalty.
+            if all(self.is_high_cost_move(mv) for mv in non_pass_moves):
+                return 0.25
+            return -0.1
+
+        strategic_bonus = 0.1
+        comparable_moves = [mv for mv in non_pass_moves if mv["type"] == move["type"] and len(mv["cards"]) == len(move["cards"])]
+        if comparable_moves and self.last_move:
+            strengths = [self.evaluate_move(mv) for mv in comparable_moves]
+            best_strength = min(strengths)
+            played_strength = self.evaluate_move(move)
+            if played_strength <= best_strength + 1e-5:
+                strategic_bonus += 0.25
+            else:
+                strategic_bonus -= min(0.2, (played_strength - best_strength) / 12)
+        elif not self.last_move:
+            strategic_bonus += 0.05
+
+        if self.is_high_cost_move(move):
+            strategic_bonus -= 0.05
+
+        return strategic_bonus
+
     def is_valid_move(self, move):
         """
         Checks if the move is valid.
@@ -395,35 +548,44 @@ class DaifugoEnv:
         Executes the move corresponding to the discrete action index.
         Returns (obs, reward, done, info). Invalid moves receive a penalty.
         """
-        move = self.decode_action(action_index, self.current_player)
+        player_index = self.current_player
+        valid_moves = self.get_valid_moves(player_index)
+        move = self.decode_action(action_index, player_index)
         if move is None or (not self.first_move and self.last_move is not None and not self.is_valid_move(move)):
             reward = -1
             obs = self.get_obs()
             return obs, reward, False, {}
+        strategic_reward = self.compute_strategic_reward(move, valid_moves)
+
         if move["type"] == "pass":
             self.pass_count += 1
-            self.move_log.append(f"Player {self.current_player} passes.")
+            self.move_log.append(f"Player {player_index} passes.")
         else:
             for card in move["cards"]:
-                if card in self.hands[self.current_player]:
-                    self.hands[self.current_player].remove(card)
+                if card in self.hands[player_index]:
+                    self.hands[player_index].remove(card)
             self.last_move = move
             self.last_play_type = move["type"]
             self.pass_count = 0
-            self.move_log.append(f"Player {self.current_player} plays {move['type']} with: " +
+            self.move_log.append(f"Player {player_index} plays {move['type']} with: " +
                                  " ".join(index_to_card(c) for c in move["cards"]))
             if move["type"] == "four" and self.use_revolution:
                 self.revolution = not self.revolution
                 self.move_log.append(f"Revolution triggered! Now: {'Revolution' if self.revolution else 'Normal'}")
-        if len(self.hands[self.current_player]) == 0 and self.current_player not in self.winner_order:
-            self.winner_order.append(self.current_player)
-            self.move_log.append(f"Player {self.current_player} finished at rank {len(self.winner_order)}.")
+        hand_size_after = len(self.hands[player_index])
+        just_finished = False
+        if hand_size_after == 0 and player_index not in self.winner_order:
+            self.winner_order.append(player_index)
+            self.move_log.append(f"Player {player_index} finished at rank {len(self.winner_order)}.")
+            just_finished = True
         remaining = self.num_players - len(self.winner_order)
+        table_cleared = False
         if self.pass_count >= (remaining - 1):
             self.last_move = None
             self.last_play_type = None
             self.pass_count = 0
             self.move_log.append("Table cleared.")
+            table_cleared = True
         next_player = (self.current_player + 1) % self.num_players
         while next_player in self.winner_order:
             next_player = (next_player + 1) % self.num_players
@@ -435,7 +597,17 @@ class DaifugoEnv:
         info = {}
         if done:
             info["winner_order"] = self.winner_order + [self.current_player]
-        reward = 1
+        reward = 0.2 + strategic_reward
+        if table_cleared:
+            reward += 0.3
+        if move["type"] != "pass":
+            reward += 0.05 * len(move["cards"])
+        reward += max(0, 0.2 - 0.02 * hand_size_after)
+        if just_finished:
+            reward += 1.5
+        if done and not just_finished:
+            # Encourage staying out of last place.
+            reward += 0.5
         obs = self.get_obs()
         return obs, reward, done, info
 
@@ -446,14 +618,32 @@ class DaifugoEnv:
 class DQN(nn.Module):
     def __init__(self, input_dim: int, output_dim: int):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, output_dim)
-    
+        hidden_dim = 512
+        intermediate_dim = 256
+        self.feature = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, intermediate_dim),
+            nn.ReLU(),
+        )
+        self.value_stream = nn.Sequential(
+            nn.Linear(intermediate_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(intermediate_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim),
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        features = self.feature(x)
+        value = self.value_stream(features)
+        advantage = self.advantage_stream(features)
+        advantage_mean = advantage.mean(dim=1, keepdim=True)
+        return value + advantage - advantage_mean
 
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
 
@@ -574,11 +764,28 @@ def human_select_action(env, player_index):
 # Action Selection and Training Functions
 # ===============================
 
-def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_actions: list, device: torch.device):
+def _action_priority_key(env: DaifugoEnv, player_index: int, action_index: int):
+    """Key for sorting actions by conservatism and card strength."""
+    move = env.decode_action(action_index, player_index)
+    if move is None:
+        return (3, action_index)
+    if move["type"] == "pass":
+        return (0, action_index)
+    high_cost = env.is_high_cost_move(move)
+    strength = env.evaluate_move(move)
+    return (1 + int(high_cost), strength, action_index)
+
+
+def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_actions: list,
+                  device: torch.device, env: DaifugoEnv | None = None,
+                  player_index: int | None = None):
     """
     Epsilon-greedy action selection over valid actions.
     """
     if random.random() < epsilon or not valid_actions:
+        if env is not None and player_index is not None and valid_actions:
+            ordered = sorted(valid_actions, key=lambda a: _action_priority_key(env, player_index, a))
+            return random.choice(ordered[: max(1, len(ordered) // 2)])
         return random.choice(valid_actions) if valid_actions else 0
     state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -586,7 +793,11 @@ def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_act
     mask = np.full(q_values.shape, -np.inf)
     for a in valid_actions:
         mask[a] = q_values[a]
-    return int(np.argmax(mask))
+    best_value = np.max(mask)
+    candidate_actions = [a for a in valid_actions if mask[a] >= best_value - 1e-6]
+    if env is not None and player_index is not None and len(candidate_actions) > 1:
+        candidate_actions.sort(key=lambda a: _action_priority_key(env, player_index, a))
+    return int(candidate_actions[0])
 
 def train_dqn(model: nn.Module, target_model: nn.Module, optimizer: optim.Optimizer,
               criterion: nn.Module, replay_buffer: ReplayBuffer, batch_size: int,
@@ -612,6 +823,7 @@ def train_dqn(model: nn.Module, target_model: nn.Module, optimizer: optim.Optimi
     loss = criterion(current_q, target_q)
     optimizer.zero_grad()
     loss.backward()
+    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     return loss.item()
 
@@ -728,7 +940,8 @@ def main():
                 if HUMAN_PLAYER and current_player == 0:
                     action = human_select_action(env, current_player)
                 else:
-                    action = select_action(agents[current_player], state, epsilons[current_player], valid_actions, DEVICE)
+                    action = select_action(agents[current_player], state, epsilons[current_player],
+                                           valid_actions, DEVICE, env, current_player)
                 # Decode move for logging.
                 current_move = env.decode_action(action, current_player)
                 next_state, reward, done, info = env.step(action)
