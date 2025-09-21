@@ -778,8 +778,7 @@ def _action_priority_key(env: DaifugoEnv, player_index: int, action_index: int):
 
 
 def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_actions: list,
-                  device: torch.device, env: Optional[DaifugoEnv] = None,
-                  player_index: Optional[int] = None):
+
     """
     Epsilon-greedy action selection over valid actions.
     """
