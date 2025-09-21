@@ -9,6 +9,7 @@ import os
 import matplotlib.pyplot as plt
 import csv
 import sys
+from typing import Optional
 from torch.utils.tensorboard import SummaryWriter
 
 # ===============================
@@ -777,8 +778,7 @@ def _action_priority_key(env: DaifugoEnv, player_index: int, action_index: int):
 
 
 def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_actions: list,
-                  device: torch.device, env: DaifugoEnv | None = None,
-                  player_index: int | None = None):
+
     """
     Epsilon-greedy action selection over valid actions.
     """
