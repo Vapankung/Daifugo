@@ -37,6 +37,7 @@ DECK_SIZE = 53
 #   80-92: four-of-a-kind plays (r = action-80)
 #   93-212: sequence plays (length 3,4,5; enumerated by suit, length, and starting rank)
 ACTION_SPACE_SIZE = 213
+MOVE_TYPES = ["single", "pair", "triplet", "four", "sequence"]
 
 # Precompute the sequence mapping list.
 # Each element is a tuple: (length, suit_index, start_rank_index)
@@ -177,22 +178,33 @@ class DaifugoEnv:
         fugou = self.winner_order[1]
         hinmin = self.winner_order[-2]
         dai_hinmin = self.winner_order[-1]
-        if len(self.hands[dai_hinmin]) >= 2:
-            cards_to_exchange = sorted(self.hands[dai_hinmin],
-                                       key=lambda c: self.card_rank_value(c),
-                                       reverse=True)[:2]
-            for card in cards_to_exchange:
-                self.hands[dai_hinmin].remove(card)
-                self.hands[dai_fugou].append(card)
-            self.hands[dai_fugou].sort()
-            self.hands[dai_hinmin].sort()
-        if len(self.hands[hinmin]) >= 1:
-            card_to_exchange = sorted(self.hands[hinmin],
-                                      key=lambda c: self.card_rank_value(c),
-                                      reverse=True)[0]
-            self.hands[hinmin].remove(card_to_exchange)
-            self.hands[fugou].append(card_to_exchange)
-            self.hands[fugou].sort()
+        self._exchange_between_players(dai_hinmin, dai_fugou, 2)
+        self._exchange_between_players(hinmin, fugou, 1)
+
+    def _exchange_between_players(self, poor_player, rich_player, count):
+        """Poor player gives strongest cards; rich player returns weakest cards."""
+        if len(self.hands[poor_player]) < count or len(self.hands[rich_player]) < count:
+            return
+
+        poor_gives = sorted(
+            self.hands[poor_player],
+            key=lambda c: self.card_rank_value(c),
+            reverse=True,
+        )[:count]
+        for card in poor_gives:
+            self.hands[poor_player].remove(card)
+            self.hands[rich_player].append(card)
+
+        rich_returns = sorted(
+            self.hands[rich_player],
+            key=lambda c: self.card_rank_value(c),
+        )[:count]
+        for card in rich_returns:
+            self.hands[rich_player].remove(card)
+            self.hands[poor_player].append(card)
+
+        self.hands[poor_player].sort()
+        self.hands[rich_player].sort()
     
     def card_rank_value(self, card_index):
         """Returns the rank value of a card (adjusted for revolution)."""
@@ -205,18 +217,44 @@ class DaifugoEnv:
     def get_obs(self):
         """
         Returns the observation vector for the current player.
-        It is a binary vector for the player's hand (length 53)
-        concatenated with a 10-length encoding for the last move.
+        The encoding is player-relative and includes hand cards, last move cards/type/strength,
+        revolution state, pass count, relative hand sizes, and finished-player flags.
         """
         hand_obs = np.zeros(DECK_SIZE, dtype=np.float32)
         for card in self.hands[self.current_player]:
             hand_obs[card] = 1.0
-        last_move_obs = np.zeros(10, dtype=np.float32)
+
+        last_cards_obs = np.zeros(DECK_SIZE, dtype=np.float32)
+        last_type_obs = np.zeros(len(MOVE_TYPES), dtype=np.float32)
+        scalar_obs = np.zeros(4, dtype=np.float32)
         if self.last_move:
-            type_mapping = {"single": 0, "pair": 1, "triplet": 2, "four": 3, "sequence": 4, "pass": 5}
-            last_move_obs[0] = type_mapping.get(self.last_move["type"], -1)
-            last_move_obs[1] = len(self.last_move["cards"])
-        return np.concatenate([hand_obs, last_move_obs])
+            for card in self.last_move["cards"]:
+                last_cards_obs[card] = 1.0
+            if self.last_move["type"] in MOVE_TYPES:
+                last_type_obs[MOVE_TYPES.index(self.last_move["type"])] = 1.0
+            scalar_obs[0] = len(self.last_move["cards"]) / 5.0
+            scalar_obs[1] = self.evaluate_move(self.last_move) / 14.0
+
+        scalar_obs[2] = float(self.revolution)
+        scalar_obs[3] = self.pass_count / max(1, self.num_players - 1)
+
+        relative_hand_sizes = np.array([
+            len(self.hands[(self.current_player + offset) % self.num_players]) / DECK_SIZE
+            for offset in range(self.num_players)
+        ], dtype=np.float32)
+        relative_finished = np.array([
+            float(((self.current_player + offset) % self.num_players) in self.winner_order)
+            for offset in range(self.num_players)
+        ], dtype=np.float32)
+
+        return np.concatenate([
+            hand_obs,
+            last_cards_obs,
+            last_type_obs,
+            scalar_obs,
+            relative_hand_sizes,
+            relative_finished,
+        ])
     
     def load_card_images(self):
         """Loads card images from the 'cards' directory if available."""
@@ -432,11 +470,8 @@ class DaifugoEnv:
             move = self.decode_action(a, player_index)
             if move is None:
                 continue
-            if self.first_move or self.last_move is None:
+            if self.is_valid_move(move):
                 valid_indices.append(a)
-            else:
-                if self.is_valid_move(move):
-                    valid_indices.append(a)
         return valid_indices
 
     def get_valid_moves(self, player_index):
@@ -509,7 +544,7 @@ class DaifugoEnv:
         must match the last move and its evaluated strength must be higher.
         """
         if move["type"] == "pass":
-            return not self.first_move
+            return self.last_move is not None
         if self.first_move or self.last_move is None:
             return True
         if move["type"] != self.last_move["type"]:
@@ -552,7 +587,7 @@ class DaifugoEnv:
         player_index = self.current_player
         valid_moves = self.get_valid_moves(player_index)
         move = self.decode_action(action_index, player_index)
-        if move is None or (not self.first_move and self.last_move is not None and not self.is_valid_move(move)):
+        if move is None or not self.is_valid_move(move):
             reward = -1
             obs = self.get_obs()
             return obs, reward, False, {}
@@ -570,7 +605,7 @@ class DaifugoEnv:
             self.pass_count = 0
             self.move_log.append(f"Player {player_index} plays {move['type']} with: " +
                                  " ".join(index_to_card(c) for c in move["cards"]))
-            if move["type"] == "four" and self.use_revolution:
+            if move["type"] == "four" and self.use_revolution and 52 not in move["cards"]:
                 self.revolution = not self.revolution
                 self.move_log.append(f"Revolution triggered! Now: {'Revolution' if self.revolution else 'Normal'}")
         hand_size_after = len(self.hands[player_index])
@@ -594,21 +629,28 @@ class DaifugoEnv:
         self.first_move = False
         if self.visualize:
             self.render()
-        done = (len(self.winner_order) == self.num_players - 1)
+        done = False
         info = {}
-        if done:
-            info["winner_order"] = self.winner_order + [self.current_player]
+        if len(self.winner_order) == self.num_players - 1:
+            final_player = next(
+                player for player in range(self.num_players)
+                if player not in self.winner_order
+            )
+            self.winner_order.append(final_player)
+            self.move_log.append(f"Player {final_player} finished at rank {len(self.winner_order)}.")
+            done = True
+            info["winner_order"] = list(self.winner_order)
         reward = 0.2 + strategic_reward
         if table_cleared:
-            reward += 0.3
+            reward += 0.1
         if move["type"] != "pass":
-            reward += 0.05 * len(move["cards"])
-        reward += max(0, 0.2 - 0.02 * hand_size_after)
+            reward += 0.02 * len(move["cards"])
+        reward += max(0, 0.1 - 0.01 * hand_size_after)
         if just_finished:
-            reward += 1.5
+            rank = self.winner_order.index(player_index) + 1
+            reward += 2.0 * (self.num_players - rank + 1)
         if done and not just_finished:
-            # Encourage staying out of last place.
-            reward += 0.5
+            reward -= 2.0
         obs = self.get_obs()
         return obs, reward, done, info
 
@@ -646,7 +688,10 @@ class DQN(nn.Module):
         advantage_mean = advantage.mean(dim=1, keepdim=True)
         return value + advantage - advantage_mean
 
-Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
+Transition = namedtuple(
+    'Transition',
+    ('state', 'action', 'reward', 'next_state', 'done', 'next_valid_actions')
+)
 
 class ReplayBuffer:
     def __init__(self, capacity: int):
@@ -778,7 +823,8 @@ def _action_priority_key(env: DaifugoEnv, player_index: int, action_index: int):
 
 
 def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_actions: list,
-
+                  device: torch.device, env: Optional[DaifugoEnv] = None,
+                  player_index: Optional[int] = None):
     """
     Epsilon-greedy action selection over valid actions.
     """
@@ -799,6 +845,26 @@ def select_action(model: nn.Module, state: np.ndarray, epsilon: float, valid_act
         candidate_actions.sort(key=lambda a: _action_priority_key(env, player_index, a))
     return int(candidate_actions[0])
 
+
+def select_rule_based_action(env: DaifugoEnv, player_index: int):
+    """Conservative fixed bot used to stabilize player-0 DQN training."""
+    valid_actions = env.get_valid_action_indices(player_index)
+    if not valid_actions:
+        return 0
+    playable_actions = [
+        action for action in valid_actions
+        if env.decode_action(action, player_index)["type"] != "pass"
+    ]
+    if not playable_actions:
+        return 0
+    if 0 in valid_actions and all(
+        env.is_high_cost_move(env.decode_action(action, player_index))
+        for action in playable_actions
+    ):
+        return 0
+    playable_actions.sort(key=lambda a: _action_priority_key(env, player_index, a))
+    return playable_actions[0]
+
 def train_dqn(model: nn.Module, target_model: nn.Module, optimizer: optim.Optimizer,
               criterion: nn.Module, replay_buffer: ReplayBuffer, batch_size: int,
               gamma: float, device: torch.device) -> float:
@@ -817,8 +883,22 @@ def train_dqn(model: nn.Module, target_model: nn.Module, optimizer: optim.Optimi
     current_q = model(state_batch).gather(1, action_batch)
     with torch.no_grad():
         next_q = model(next_state_batch)
-        next_actions = torch.argmax(next_q, dim=1, keepdim=True)
-        next_q_target = target_model(next_state_batch).gather(1, next_actions)
+        masked_next_q = torch.full_like(next_q, -torch.inf)
+        for row, valid_actions in enumerate(batch.next_valid_actions):
+            if valid_actions:
+                masked_next_q[row, list(valid_actions)] = next_q[row, list(valid_actions)]
+            else:
+                masked_next_q[row] = 0.0
+        next_actions = torch.argmax(masked_next_q, dim=1, keepdim=True)
+
+        target_next_q = target_model(next_state_batch)
+        masked_target_next_q = torch.full_like(target_next_q, -torch.inf)
+        for row, valid_actions in enumerate(batch.next_valid_actions):
+            if valid_actions:
+                masked_target_next_q[row, list(valid_actions)] = target_next_q[row, list(valid_actions)]
+            else:
+                masked_target_next_q[row] = 0.0
+        next_q_target = masked_target_next_q.gather(1, next_actions)
         target_q = reward_batch + gamma * next_q_target * (1 - done_batch)
     loss = criterion(current_q, target_q)
     optimizer.zero_grad()
@@ -887,8 +967,18 @@ def main():
             model_filename = f"dqn_player_{i}.pth"
             if os.path.exists(model_filename):
                 checkpoint = torch.load(model_filename, map_location=DEVICE)
-                agents[i].load_state_dict(checkpoint["state_dict"])
-                target_agents[i].load_state_dict(checkpoint["state_dict"])
+                state_dict = checkpoint["state_dict"]
+                expected_shape = agents[i].state_dict()["feature.0.weight"].shape
+                loaded_shape = state_dict.get("feature.0.weight", torch.empty(0)).shape
+                if loaded_shape != expected_shape:
+                    print(
+                        f"Skipped {model_filename}: observation size changed "
+                        f"from {loaded_shape[1] if len(loaded_shape) == 2 else 'unknown'} "
+                        f"to {expected_shape[1]}."
+                    )
+                    continue
+                agents[i].load_state_dict(state_dict)
+                target_agents[i].load_state_dict(state_dict)
                 loaded_ep = checkpoint.get("episode", "Unknown")
                 print(f"Loaded model for player {i} from {model_filename} (saved at episode {loaded_ep}).")
             else:
@@ -898,6 +988,14 @@ def main():
     criterion = nn.MSELoss()
     replay_buffers = [ReplayBuffer(REPLAY_BUFFER_CAPACITY) for _ in range(NUM_PLAYERS)]
     epsilons = [EPSILON_START for _ in range(NUM_PLAYERS)]
+    if TRAINING_MODE and not HUMAN_PLAYER:
+        trainable_players = {0}
+        print("Training Player 0 DQN against fixed rule-based bots.")
+    else:
+        trainable_players = {
+            player for player in range(NUM_PLAYERS)
+            if not (HUMAN_PLAYER and player == 0)
+        }
     csv_filename = "training_log.csv"
     csv_file = open(csv_filename, "w", newline="")
     csv_writer = csv.writer(csv_file)
@@ -931,14 +1029,29 @@ def main():
             step = 0
             total_rewards = [0 for _ in range(NUM_PLAYERS)]
             loss_records = [[] for _ in range(NUM_PLAYERS)]
+            pending_transitions = [None for _ in range(NUM_PLAYERS)]
             # Record move counts for current episode.
             episode_move_count = {"pass": 0, "single": 0, "pair": 0, "triplet": 0, "four": 0, "sequence": 0}
             while not done and step < MAX_STEPS_PER_EPISODE:
                 step += 1
                 current_player = env.current_player
                 valid_actions = env.get_valid_action_indices(current_player)
+                if TRAINING_MODE and current_player in trainable_players and pending_transitions[current_player]:
+                    prev_state, prev_action, prev_reward = pending_transitions[current_player]
+                    replay_buffers[current_player].push(
+                        prev_state, prev_action, prev_reward, state, False, valid_actions
+                    )
+                    loss = train_dqn(agents[current_player], target_agents[current_player],
+                                     optimizers[current_player], criterion,
+                                     replay_buffers[current_player], BATCH_SIZE, GAMMA, DEVICE)
+                    if loss:
+                        loss_records[current_player].append(loss)
+                    pending_transitions[current_player] = None
+
                 if HUMAN_PLAYER and current_player == 0:
                     action = human_select_action(env, current_player)
+                elif TRAINING_MODE and current_player not in trainable_players:
+                    action = select_rule_based_action(env, current_player)
                 else:
                     action = select_action(agents[current_player], state, epsilons[current_player],
                                            valid_actions, DEVICE, env, current_player)
@@ -948,19 +1061,31 @@ def main():
                 total_rewards[current_player] += reward
                 if reward != -1 and current_move is not None:
                     episode_move_count[current_move["type"]] += 1
-                replay_buffers[current_player].push(state, action, reward, next_state, done)
-                if TRAINING_MODE and (not (HUMAN_PLAYER and current_player == 0)):
-                    loss = train_dqn(agents[current_player], target_agents[current_player],
-                                     optimizers[current_player], criterion,
-                                     replay_buffers[current_player], BATCH_SIZE, GAMMA, DEVICE)
-                    if loss:
-                        loss_records[current_player].append(loss)
+                if TRAINING_MODE and current_player in trainable_players:
+                    if done:
+                        replay_buffers[current_player].push(state, action, reward, next_state, True, [])
+                        loss = train_dqn(agents[current_player], target_agents[current_player],
+                                         optimizers[current_player], criterion,
+                                         replay_buffers[current_player], BATCH_SIZE, GAMMA, DEVICE)
+                        if loss:
+                            loss_records[current_player].append(loss)
+                    else:
+                        pending_transitions[current_player] = (state, action, reward)
+                if done:
+                    for pending_player, pending in enumerate(pending_transitions):
+                        if pending_player == current_player or pending is None:
+                            continue
+                        prev_state, prev_action, prev_reward = pending
+                        replay_buffers[pending_player].push(
+                            prev_state, prev_action, prev_reward, next_state, True, []
+                        )
+                        pending_transitions[pending_player] = None
                 state = next_state
                 steps_done += 1
                 if steps_done % TARGET_UPDATE_FREQ == 0:
                     for i in range(NUM_PLAYERS):
                         target_agents[i].load_state_dict(agents[i].state_dict())
-                if TRAINING_MODE and epsilons[current_player] > EPSILON_END and (not (HUMAN_PLAYER and current_player == 0)):
+                if TRAINING_MODE and current_player in trainable_players and epsilons[current_player] > EPSILON_END:
                     epsilons[current_player] = max(EPSILON_END, epsilons[current_player] * EPSILON_DECAY)
             avg_loss = np.mean([np.mean(loss_rec) if loss_rec else 0 for loss_rec in loss_records])
             episode_total_reward = sum(total_rewards)
